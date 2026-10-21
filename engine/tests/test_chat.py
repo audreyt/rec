@@ -2,13 +2,14 @@ import hashlib
 import json
 import tempfile
 import unittest
+import uuid
 from importlib.resources import files
 from pathlib import Path
 
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
-from rec_mlx.chat import load_tokenizer, normalize_messages, parse_tool_call
+from rec_mlx.chat import load_tokenizer, normalize_messages, parse_tool_call, seeded_tool_parser
 
 
 class FlintChatTests(unittest.TestCase):
@@ -173,3 +174,20 @@ class ToolCallParsingTests(unittest.TestCase):
         ):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 parse_tool_call(text, self.TOOLS)
+
+    def test_seeded_tool_call_ids_repeat_for_the_same_request(self):
+        text = self.render({"path": "a.py"})
+
+        def ids(seed, prompt):
+            parse = seeded_tool_parser(seed, prompt)
+            return [parse(text, self.TOOLS)["id"] for _ in range(2)]
+
+        first = ids(42, [1, 2, 3])
+        self.assertEqual(ids(42, [1, 2, 3]), first)
+        self.assertNotEqual(first[0], first[1])
+        self.assertNotEqual(ids(43, [1, 2, 3]), first)
+        self.assertNotEqual(ids(42, [1, 2, 4]), first)
+        self.assertEqual(uuid.UUID(first[0]).version, 4)
+        call = seeded_tool_parser(42, [1, 2, 3])(text, self.TOOLS)
+        self.assertEqual(call.pop("id"), first[0])
+        self.assertEqual(call, parse_tool_call(text, self.TOOLS))

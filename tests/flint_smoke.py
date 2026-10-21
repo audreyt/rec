@@ -70,6 +70,8 @@ def main():
     call = calls[0]
     assert call["function"]["name"] == "get_weather", called
     assert json.loads(call["function"]["arguments"])["city"].lower() == "paris", called
+    replayed = chat(messages, tools=tools, tool_choice=tool_choice)
+    assert replayed["choices"][0]["message"] == assistant, (called, replayed)
     messages += [
         assistant,
         {
@@ -107,6 +109,7 @@ def main():
         "arithmetic": "4",
         "tool_choice": tool_choice,
         "tool_round_trip": answered["choices"][0]["message"]["content"],
+        "tool_call_replayed": True,
         "streaming": True,
         "generation": generation["choices"][0]["message"]["content"],
         "usage": generation.get("usage"),
@@ -116,7 +119,8 @@ def main():
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report, indent=2) + "\n")
     print(
-        "Flint: authentication, arithmetic, tool-call round trip, streaming, and generation passed"
+        "Flint: authentication, arithmetic, tool-call round trip and replay, streaming, and generation"
+        " passed"
     )
     if report["timings"]:
         print(json.dumps(report["timings"], indent=2))

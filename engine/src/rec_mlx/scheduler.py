@@ -13,7 +13,7 @@ from mlx_lm.server import (
 )
 from mlx_lm.tokenizer_utils import NaiveStreamingDetokenizer, TokenizerWrapper
 
-from .chat import parse_tool_call
+from .chat import parse_tool_call, seeded_tool_parser
 from .engine import Sampling
 
 
@@ -154,7 +154,7 @@ class Generator(ResponseGenerator):
         ctx = GenerationContext(
             has_tool_calling=bool(request.tools),
             has_thinking=self.tokenizer.has_thinking,
-            tool_parser=parse_tool_call,
+            tool_parser=seeded_tool_parser(sampling.seed, ids),
             sequences=sequences,
             prompt=ids,
         )

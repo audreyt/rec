@@ -1,6 +1,10 @@
+import hashlib
 import json
 import re
+import uuid
+from array import array
 from importlib.resources import files
+from itertools import count
 
 from transformers import PreTrainedTokenizerFast
 
@@ -88,3 +92,22 @@ def parse_tool_call(text, tools):
                 pass
         arguments[key] = value
     return {"name": name, "arguments": arguments}
+
+
+def seeded_tool_parser(seed, prompt_tokens):
+    """Parse tool calls with IDs derived from the seed, prompt, and call order.
+
+    The sampler already replays a request exactly for a given seed; deriving the IDs the same
+    way makes the whole replayed message identical instead of differing in random UUIDs.
+    """
+    request = hashlib.sha256(seed.to_bytes(8, "little") + array("I", prompt_tokens).tobytes())
+    indices = count()
+
+    def parse(text, tools):
+        call = parse_tool_call(text, tools)
+        digest = request.copy()
+        digest.update(next(indices).to_bytes(4, "little"))
+        call["id"] = str(uuid.UUID(bytes=digest.digest()[:16], version=4))
+        return call
+
+    return parse
