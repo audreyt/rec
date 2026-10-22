@@ -1,5 +1,6 @@
 import errno
 import hmac
+import io
 import json
 import logging
 import select
@@ -7,6 +8,12 @@ import socket
 import threading
 from http.server import ThreadingHTTPServer
 
+from .anthropic import (
+    MessageEventStream,
+    anthropic_error,
+    chat_to_message,
+    messages_to_chat,
+)
 from .engine import Sampling
 
 
@@ -40,13 +47,23 @@ def make_server(
             self.wfile.write(body)
 
         def authenticated(self):
-            if api_key is not None and not hmac.compare_digest(
-                self.headers.get("Authorization", "").encode(),
-                ("Bearer " + api_key).encode(),
+            if api_key is None:
+                return True
+            expected = ("Bearer " + api_key).encode()
+            if hmac.compare_digest(self.headers.get("Authorization", "").encode(), expected):
+                return True
+            if self.path == "/v1/messages" and hmac.compare_digest(
+                self.headers.get("x-api-key", "").encode(), api_key.encode()
             ):
-                self.reply(401, {"error": "Invalid or missing bearer token"})
-                return False
-            return True
+                return True
+            self._reject(401, "Invalid or missing bearer token")
+            return False
+
+        def _reject(self, status, message):
+            if self.path == "/v1/messages" or getattr(self, "anthropic", False):
+                self.reply(status, anthropic_error(status, message))
+            else:
+                self.reply(status, {"error": message})
 
         def do_GET(self):
             if not self.authenticated():
@@ -69,31 +86,52 @@ def make_server(
         def do_POST(self):
             if not self.authenticated():
                 return
-            if self.path != "/v1/chat/completions":
-                self.reply(404, {"error": "Unknown endpoint"})
+            if self.path not in ("/v1/chat/completions", "/v1/messages"):
+                self._reject(404, "Unknown endpoint")
                 return
             try:
                 if not 0 < int(self.headers["Content-Length"]) <= 8 * 1024 * 1024:
                     raise ValueError("Request body must be between 1 byte and 8 MiB")
             except (ValueError, TypeError) as error:
-                self.reply(400, {"error": str(error)})
+                self._reject(400, str(error))
                 return
             if generator.stopping.is_set():
-                self.reply(503, {"error": "The server is stopping"})
+                self._reject(503, "The server is stopping")
                 return
             if not admission.acquire(blocking=False):
-                self.reply(
-                    429, {"error": "The request queue is full; retry after a generation finishes"}
-                )
+                self._reject(429, "The request queue is full; retry after a generation finishes")
                 return
             try:
+                if self.path == "/v1/messages":
+                    self.anthropic = True
+                    self._prepare_messages()
                 super().do_POST()
             except RequestError as error:
-                self.reply(400, {"error": str(error)})
+                self._reject(400, str(error))
             except (BrokenPipeError, ConnectionResetError):
                 logging.info("Client disconnected; cancelling its generation")
             finally:
                 admission.release()
+
+        def _prepare_messages(self):
+            length = int(self.headers["Content-Length"])
+            try:
+                body = json.loads(self.rfile.read(length).decode())
+                chat, ignored, include_thinking = messages_to_chat(body)
+            except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                raise RequestError(f"Invalid JSON in request body: {error}") from error
+            except (ValueError, TypeError, KeyError) as error:
+                raise RequestError(str(error)) from error
+            with ignored_fields_lock:
+                for field in sorted(ignored - ignored_fields):
+                    logging.warning("Ignoring unsupported request field %r", field)
+                ignored_fields.update(ignored)
+            encoded = json.dumps(chat).encode()
+            self.rfile = io.BytesIO(encoded)
+            self.headers.replace_header("Content-Length", str(len(encoded)))
+            self.anthropic_stops = tuple(chat.get("stop") or ())
+            self.anthropic_thinking = include_thinking
+            self.path = "/v1/chat/completions"
 
         def is_disconnected(self):
             try:
@@ -123,6 +161,12 @@ def make_server(
                             bytes=None,
                             top_logprobs=[],
                         )
+            if getattr(self, "anthropic", False) and not self.stream:
+                return chat_to_message(
+                    response,
+                    stop_sequences=self.anthropic_stops,
+                    include_thinking=self.anthropic_thinking,
+                )
             return response
 
         def validate_model_parameters(self):
@@ -261,8 +305,15 @@ def make_server(
                     seed=defaults.seed if self.seed is None else self.seed,
                 )
             except (ValueError, TypeError, KeyError) as error:
-                self.reply(400, {"error": str(error)})
+                self._reject(400, str(error))
                 return
+            if getattr(self, "anthropic", False) and self.stream:
+                self.wfile = MessageEventStream(
+                    self.wfile,
+                    input_tokens=len(ids),
+                    stop_sequences=self.anthropic_stops,
+                    include_thinking=self.anthropic_thinking,
+                )
             request.prompt_tokens = ids
             request.is_disconnected = self.is_disconnected
             request.generation_context = None

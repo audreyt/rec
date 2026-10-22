@@ -108,6 +108,14 @@ The response contains generated text in `choices`. For other clients, use
 base URL `http://127.0.0.1:11500/v1`, model `flint`, and the API key from
 `rec auth token`.
 
+The same server accepts the Anthropic Messages API at `/v1/messages`.
+Point `ANTHROPIC_BASE_URL` at `http://127.0.0.1:11500` and send the token
+from `rec auth token` as a bearer token or as `x-api-key`. The model is
+`flint`. System prompts, messages, tools, and stop sequences are translated
+onto the chat path, and Flint's reasoning comes back as thinking blocks. A
+field the chat API does not implement is ignored or rejected the same way
+`/v1/chat/completions` treats it.
+
 
 ## Commands
 
