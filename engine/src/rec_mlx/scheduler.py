@@ -154,7 +154,7 @@ class Generator(ResponseGenerator):
         ctx = GenerationContext(
             has_tool_calling=bool(request.tools),
             has_thinking=self.tokenizer.has_thinking,
-            tool_parser=seeded_tool_parser(sampling.seed, ids),
+            tool_parser=seeded_tool_parser(sampling, ids),
             sequences=sequences,
             prompt=ids,
         )

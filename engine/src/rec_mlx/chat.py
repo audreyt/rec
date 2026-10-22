@@ -94,13 +94,28 @@ def parse_tool_call(text, tools):
     return {"name": name, "arguments": arguments}
 
 
-def seeded_tool_parser(seed, prompt_tokens):
-    """Parse tool calls with IDs derived from the seed, prompt, and call order.
+def seeded_tool_parser(sampling, prompt_tokens):
+    """Parse tool calls with IDs derived from the sample, prompt, and call order.
 
     The sampler already replays a request exactly for a given seed; deriving the IDs the same
     way makes the whole replayed message identical instead of differing in random UUIDs.
+    The sample config is part of the hash, so a different temperature or other sampling
+    parameter does not reuse IDs from another sample of the same prompt.
     """
-    request = hashlib.sha256(seed.to_bytes(8, "little") + array("I", prompt_tokens).tobytes())
+    config = json.dumps(
+        {
+            "temperature": float(sampling.temperature),
+            "top_p": float(sampling.top_p),
+            "top_k": sampling.top_k,
+            "presence_penalty": float(sampling.presence_penalty),
+            "max_tokens": sampling.max_tokens,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    request = hashlib.sha256(sampling.seed.to_bytes(8, "little"))
+    request.update(config)
+    request.update(array("I", prompt_tokens).tobytes())
     indices = count()
 
     def parse(text, tools):
