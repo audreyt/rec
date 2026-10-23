@@ -1,5 +1,6 @@
 import argparse
 import subprocess
+import sys
 import sysconfig
 from pathlib import Path
 
@@ -13,6 +14,11 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--output", type=Path, default=r.parent / "src/rec_mlx")
 a = parser.parse_args()
 out = a.output / ("_grammar_native" + sysconfig.get_config_var("EXT_SUFFIX"))
+link_flags = (
+    ["-undefined", "dynamic_lookup", "-Wl,-rpath,@loader_path/../mlx/lib"]
+    if sys.platform == "darwin"
+    else ["-Wl,-rpath,$ORIGIN/../mlx/lib"]
+)
 subprocess.run(
     [
         "clang++",
@@ -22,9 +28,7 @@ subprocess.run(
         "-shared",
         "-fPIC",
         "-fvisibility=hidden",
-        "-undefined",
-        "dynamic_lookup",
-        "-Wl,-rpath,@loader_path/../mlx/lib",
+        *link_flags,
         "-I" + str(m / "include"),
         "-I" + str(n / "include"),
         "-I" + str(n / "ext/robin_map/include"),
