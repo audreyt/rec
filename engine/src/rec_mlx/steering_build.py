@@ -3,8 +3,9 @@
 Each JSONL line holds {"positive": messages, "negative": messages} and optional "tools": the same
 request with and without the behaviour to steer toward. Both are run through the native layers, and the residual
 at every slot is averaged over the last prompt tokens. The direction is the difference of means
-at the slot that separates the two sets best. The file adds `scale` times each slot's measured
-gap along that direction, over the slots where the separation is at least half its best.
+at the slot that separates the two sets best. The file adds `scale` times the measured gap along
+that direction at that one slot: the residual stream carries the push forward, so adding it at
+every later slot would compound it.
 """
 
 import argparse
@@ -50,14 +51,14 @@ def contrast(positive, negative, min_slot=1):
     return separation, units[best], best
 
 
-def steering_file(positive, negative, direction, separation, scale):
+def steering_file(positive, negative, direction, separation, scale, slot):
     gap = (positive.mean(axis=0) - negative.mean(axis=0)) @ direction
     pos = mx.einsum("nsd,d->ns", positive, direction)
     neg = mx.einsum("nsd,d->ns", negative, direction)
     spread = mx.sqrt((pos.var(axis=0) + neg.var(axis=0)) / 2) + 1e-6
     along = gap / spread
-    band = along >= along.max() / 2
     slots = gap.size
+    band = mx.arange(slots) == slot
     inf = mx.full((slots,), float("inf"))
     return {
         "direction": direction,
@@ -100,7 +101,7 @@ def main():
             model, [engine.prompt(p["negative"], tools=p.get("tools")) for p in pairs], args.last
         )
         separation, direction, best = contrast(positive, negative, args.min_slot)
-        tensors, report = steering_file(positive, negative, direction, separation, args.scale)
+        tensors, report = steering_file(positive, negative, direction, separation, args.scale, best)
         mx.save_safetensors(str(args.output), tensors)
     report = {"pairs": len(pairs), "best_slot": best, "scale": args.scale, **report}
     args.output.with_suffix(".json").write_text(json.dumps(report, indent=1) + "\n")

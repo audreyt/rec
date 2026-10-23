@@ -265,9 +265,9 @@ class BuildTests(unittest.TestCase):
         separation, direction, best = contrast(positive, negative)
         self.assertEqual(best, 4)
         self.assertGreater(abs(float((direction @ r).item())), 0.99)
-        tensors, report = steering_file(positive, negative, direction, separation, scale=2.0)
-        self.assertEqual(report["band"], [3, 4, 5])
-        self.assertEqual(tensors["strength"].tolist(), [0, 0, 0, 1, 1, 1, 0])
+        tensors, report = steering_file(positive, negative, direction, separation, 2.0, best)
+        self.assertEqual(report["band"], [4])
+        self.assertEqual(tensors["strength"].tolist(), [0, 0, 0, 0, 1, 0, 0])
         sign = 1 if float((direction @ r).item()) > 0 else -1
         self.assertAlmostEqual(float(tensors["shift"][4].item()), sign * 6.0, delta=0.2)
 
