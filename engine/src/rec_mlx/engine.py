@@ -54,15 +54,25 @@ class Engine:
         context_limit: int,
         enforce_tool_schemas: bool = False,
     ):
-        if platform.system() != "Darwin" or platform.machine() != "arm64":
+        if platform.machine() not in ("arm64", "aarch64"):
             raise RuntimeError("Flint requires an Apple Silicon Mac")
-        memory = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True))
+        if platform.system() == "Darwin":
+            memory = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True))
+        else:
+            meminfo = Path("/proc/meminfo").read_text()
+            memory = next(
+                int(line.split()[1]) * 1024
+                for line in meminfo.splitlines()
+                if line.startswith("MemTotal:")
+            )
         if memory < 48 * 1024**3:
             raise RuntimeError("This build targets Macs with at least 48 GiB of memory")
         import mlx.core as mx
 
         device = mx.device_info()
-        native_decode = device["device_name"] == "Apple M2 Max"
+        native_decode = device["device_name"] == "Apple M2 Max" or (
+            device["architecture"], device["device_name"]
+        ) == ("honeykrisp", "Apple M2 Max (G14C B1)")
         profile = None if native_decode else profile_for_device(device)
         self.identity = validate(directory, manifest_path)
         config = json.loads((directory / "config.json").read_text())

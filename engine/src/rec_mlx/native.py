@@ -3,6 +3,7 @@ import time
 import mlx.core as mx
 
 from .cache import KVStorage
+from .kernels.device import fitting_prefill_chunk
 from .quantized import QATSession
 
 
@@ -35,9 +36,33 @@ class NativeRuntime:
 
 
 class NativeSession(QATSession):
+    def _prefill_chunk_size(self, begin, remaining):
+        if mx.device_info()["architecture"] == "honeykrisp":
+            # Leave room for weight banks in Honeykrisp's GPU address space.
+            return fitting_prefill_chunk(
+                begin,
+                remaining,
+                self.engine.prefill_chunk_size,
+                self.engine.model.config["num_attention_heads"],
+                512 * 1024 * 1024,
+            )
+        return super()._prefill_chunk_size(begin, remaining)
+
+    def _after_prefill_chunk(self):
+        if mx.device_info()["architecture"] != "honeykrisp":
+            return
+        # Weight banks already fragment this GPU's address space. Drop the score
+        # buffer before the next chunk instead of retaining it in the cache.
+        mx.clear_cache()
+
     def prefill(
         self, tokens, *, prefix=None, should_stop=lambda: False, interrupt_between_layers=False
     ):
+        # A stop inside a Honeykrisp layer advances only some KV offsets, and the
+        # next mask no longer matches those caches. The chunk loop still honors
+        # should_stop between steps.
+        if mx.device_info()["architecture"] == "honeykrisp":
+            interrupt_between_layers = False
         logits = super().prefill(
             tokens,
             prefix=prefix,

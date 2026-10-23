@@ -37,6 +37,16 @@ not supported on M2 Max. Measure throughput on your own machine with your
 actual workload; the M4 Pro results above do not establish M2 Max performance
 or imply the same speedup.
 
+### Linux Honeykrisp
+
+On Linux ARM64, Honeykrisp's `Apple M2 Max (G14C B1)` uses native MLX
+decoding rather than the resident Metal decoder. Prefill chunks stay within
+512 MiB of fp32 attention scores, and cancellation happens between chunks
+rather than inside a layer. This is not a Linux installer: the macOS
+installer and bundled runtime remain Darwin-only. `engine/native/build.py`
+links the grammar extension with `$ORIGIN` on Linux and `@loader_path` on
+Darwin.
+
 
 ## Install
 

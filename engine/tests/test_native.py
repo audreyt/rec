@@ -17,7 +17,12 @@ class TinyModel:
     make_cache = QATModel.make_cache
 
     def __init__(self):
-        self.config = {"num_key_value_heads": 4, "head_dim": 128, "sliding_window": 4}
+        self.config = {
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+            "head_dim": 128,
+            "sliding_window": 4,
+        }
         self.layers = [
             SimpleNamespace(attention=SimpleNamespace(is_global=index == 0)) for index in range(49)
         ]
@@ -45,7 +50,10 @@ class TinyModel:
         return self.native.lm_head(self.hidden(tokens, cache))
 
 
-@unittest.skipUnless(mx.metal.is_available(), "requires Apple Metal")
+@unittest.skipUnless(
+    mx.metal.is_available() or mx.device_info()["architecture"] == "honeykrisp",
+    "requires Apple Metal or Honeykrisp",
+)
 class NativeTests(unittest.TestCase):
     def setUp(self):
         # Preserve real storage layout/writes while reaching bank boundaries cheaply.
@@ -61,6 +69,55 @@ class NativeTests(unittest.TestCase):
         logits = session.prefill(tokens)
         self.assertEqual(logits.shape, (1, 1, 2))
         return session
+
+    def test_honeykrisp_long_context_bounds_attention_storage(self):
+        self.model.config["num_attention_heads"] = 32
+        self.runtime.prefill_chunk_size = 512
+        session = self.runtime.make_session(max_new_tokens=1)
+        with patch("rec_mlx.native.mx.device_info", return_value={"architecture": "honeykrisp"}):
+            size = session._prefill_chunk_size(262_000, 144)
+        self.assertGreater(size, 0)
+        self.assertLess(size, 144)
+        self.assertLessEqual(32 * size * (262_000 + size) * 4, 512 * 1024 * 1024)
+        self.assertGreater(32 * (size + 1) * (262_001 + size) * 4, 512 * 1024 * 1024)
+
+    def _fake_parent_prefill(self, session, captured):
+        layers = [SimpleNamespace(grow=lambda size: None, state=None) for _ in range(49)]
+
+        def fake_prefill(self, tokens, *, prefix=None, should_stop=lambda: False, interrupt_between_layers=False):
+            captured["interrupt"] = interrupt_between_layers
+            session.prompt_cache = SimpleNamespace(fork=lambda: SimpleNamespace(layers=layers))
+            return mx.zeros((1, 1, 2))
+
+        return fake_prefill
+
+    def test_honeykrisp_prefill_stops_between_chunks_and_drops_the_cache(self):
+        session = self.runtime.make_session(max_new_tokens=1)
+        captured = {}
+        with (
+            patch("rec_mlx.native.mx.device_info", return_value={"architecture": "honeykrisp"}),
+            patch("rec_mlx.native.mx.clear_cache") as clear,
+            patch("rec_mlx.native.mx.eval"),
+            patch.object(QATSession, "prefill", self._fake_parent_prefill(session, captured)),
+        ):
+            session.prefill([1, 2, 3, 4], interrupt_between_layers=True)
+            session._after_prefill_chunk()
+        self.assertFalse(captured["interrupt"])
+        clear.assert_called_once()
+
+    def test_other_devices_still_interrupt_inside_a_layer(self):
+        session = self.runtime.make_session(max_new_tokens=1)
+        captured = {}
+        with (
+            patch("rec_mlx.native.mx.device_info", return_value={"architecture": "applegpu_g14g"}),
+            patch("rec_mlx.native.mx.clear_cache") as clear,
+            patch("rec_mlx.native.mx.eval"),
+            patch.object(QATSession, "prefill", self._fake_parent_prefill(session, captured)),
+        ):
+            session.prefill([1, 2], interrupt_between_layers=True)
+            session._after_prefill_chunk()
+        self.assertTrue(captured["interrupt"])
+        clear.assert_not_called()
 
     def test_runtime_contract_and_shared_prefill_state(self):
         self.assertEqual(NativeRuntime(self.model).prefill_chunk_size, 512)

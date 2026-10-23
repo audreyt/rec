@@ -76,6 +76,27 @@ def test_exact_m2_max_selects_native_without_resident_sampler(initialization):
     mocks.compiler.assert_not_called()
 
 
+def test_honeykrisp_m2_max_selects_native_on_linux(initialization, monkeypatch):
+    monkeypatch.setattr(engine.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(engine.platform, "machine", lambda: "aarch64")
+    real_read_text = engine.Path.read_text
+
+    def read_text(self, *args, **kwargs):
+        if self == engine.Path("/proc/meminfo"):
+            return "MemTotal:        67108864 kB\n"
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(engine.Path, "read_text", read_text)
+
+    selected = initialize(initialization, "Apple M2 Max (G14C B1)", "honeykrisp")
+
+    initialization.native.assert_called_once_with(initialization.model.return_value)
+    initialization.resident.assert_not_called()
+    assert selected.resident_sampler is None
+    assert selected.startup["device_profile"] == "M2 Max"
+    assert selected.startup["decode_strategy"] == "native_mlx"
+
+
 @pytest.mark.parametrize(
     ("name", "architecture", "profile"),
     [
@@ -106,6 +127,7 @@ def test_supported_devices_keep_resident_backend(initialization, name, architect
         ("Apple M2 Pro", "applegpu_g14g"),
         ("Apple M2 Max Extra", "applegpu_g14g"),
         ("Apple M5 Max", "unsupported"),
+        ("Apple M2 Max (G14C B1)", "unsupported"),
     ],
 )
 def test_unsupported_device_rejected_before_loading(initialization, name, architecture):
