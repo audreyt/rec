@@ -74,7 +74,8 @@ rec exec pi install npm:PACKAGE
 
 ### Use your own harness
 
-`rec` exposes an OpenAI-compatible chat-completions API. Start the server:
+`rec` exposes OpenAI and Anthropic-compatible chat-completion APIs.
+Start the server:
 
 ```bash
 rec serve
@@ -95,7 +96,7 @@ instead of running it. Replace the harness path with the path to your own
 harness. The command also points the harness at rec's own settings and
 sessions; remove those variables to keep yours.
 
-To send a request directly:
+To send a request directly to the OpenAI-compatible API:
 
 ```bash
 curl -fsS http://127.0.0.1:11500/v1/chat/completions \
@@ -107,6 +108,11 @@ curl -fsS http://127.0.0.1:11500/v1/chat/completions \
 The response contains generated text in `choices`. For other clients, use
 base URL `http://127.0.0.1:11500/v1`, model `flint`, and the API key from
 `rec auth token`.
+
+The Anthropic-compatible API is available at
+`http://127.0.0.1:11500/v1/messages`. Point `ANTHROPIC_BASE_URL` at
+`http://127.0.0.1:11500` and send the token from `rec auth token` as a bearer
+token or as `x-api-key`. The model is `flint`.
 
 ### Steer the residual stream
 
