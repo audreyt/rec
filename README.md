@@ -74,7 +74,8 @@ rec exec pi install npm:PACKAGE
 
 ### Use your own harness
 
-`rec` exposes an OpenAI-compatible chat-completions API. Start the server:
+`rec` exposes OpenAI and Anthropic-compatible chat-completion APIs.
+Start the server:
 
 ```bash
 rec serve
@@ -95,7 +96,7 @@ instead of running it. Replace the harness path with the path to your own
 harness. The command also points the harness at rec's own settings and
 sessions; remove those variables to keep yours.
 
-To send a request directly:
+To send a request directly to the OpenAI-compatible API:
 
 ```bash
 curl -fsS http://127.0.0.1:11500/v1/chat/completions \
@@ -108,16 +109,10 @@ The response contains generated text in `choices`. For other clients, use
 base URL `http://127.0.0.1:11500/v1`, model `flint`, and the API key from
 `rec auth token`.
 
-The same server accepts the Anthropic Messages API at `/v1/messages`.
-Point `ANTHROPIC_BASE_URL` at `http://127.0.0.1:11500` and send the token
-from `rec auth token` as a bearer token or as `x-api-key`. The model is
-`flint`. System prompts, messages, tools, and stop sequences are translated
-onto the chat path, and Flint's reasoning comes back as thinking blocks. A
-field the chat API does not implement is ignored or rejected the same way
-`/v1/chat/completions` treats it.
-Flint reads text only, so image and document blocks become a short note
-and a plain-text document keeps its text. For Claude Code, also set
-`ANTHROPIC_MODEL=flint` and `ANTHROPIC_SMALL_FAST_MODEL=flint`.
+The Anthropic-compatible API is available at
+`http://127.0.0.1:11500/v1/messages`. Point `ANTHROPIC_BASE_URL` at
+`http://127.0.0.1:11500` and send the token from `rec auth token` as a bearer
+token or as `x-api-key`. The model is `flint`.
 
 
 ## Commands
