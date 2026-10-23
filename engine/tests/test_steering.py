@@ -253,6 +253,25 @@ class KernelTests(unittest.TestCase):
         self.assertTrue(mx.array_equal(trace[0], mx.zeros_like(h[0])).item())
 
 
+class BuildTests(unittest.TestCase):
+    def test_recovers_a_planted_direction_and_its_band(self):
+        from rec_mlx.steering_build import contrast, steering_file
+
+        r = unit(64, seed=11)
+        noise = mx.random.normal((2, 20, 7, 64), key=mx.random.key(12)) * 0.1
+        planted = mx.zeros((7,)).at[mx.array([3, 4, 5])].add(mx.array([2.0, 3.0, 2.0]))
+        positive = noise[0] + planted[None, :, None] * r
+        negative = noise[1]
+        separation, direction, best = contrast(positive, negative)
+        self.assertEqual(best, 4)
+        self.assertGreater(abs(float((direction @ r).item())), 0.99)
+        tensors, report = steering_file(positive, negative, direction, separation, scale=2.0)
+        self.assertEqual(report["band"], [3, 4, 5])
+        self.assertEqual(tensors["strength"].tolist(), [0, 0, 0, 1, 1, 1, 0])
+        sign = 1 if float((direction @ r).item()) > 0 else -1
+        self.assertAlmostEqual(float(tensors["shift"][4].item()), sign * 6.0, delta=0.2)
+
+
 class CommandLineTests(unittest.TestCase):
     def test_flags_reach_the_engine(self):
         engine = Mock(identity={"model_id": "flint"}, startup={})

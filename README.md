@@ -129,6 +129,19 @@ unchanged. The `ready` event reports
 the file's SHA-256 and its active slots. `rec serve` does not pass these flags
 yet.
 
+`--probe-file FILE` reads a direction without steering. Each generated token
+gets the residual's projection on it after the embedding and after every layer,
+and the `--metrics` log records each request's per-layer mean and maximum, plus
+the per-token series after `--probe-layer`. The probe reads the per-layer state
+the decoder already keeps, so tokens and speed are unchanged.
+
+To build a direction, write a JSONL file of contrasting chats, one
+`{"positive": [...], "negative": [...]}` pair per line with optional `tools`,
+and run `python -m rec_mlx.steering_build --pairs FILE --output OUT.safetensors`
+with the model flags. It takes the difference of the two sets' mean residuals at
+the slot that separates them best and writes a file that adds that gap, times
+`--scale`, over the slots where the separation holds.
+
 
 ## Commands
 

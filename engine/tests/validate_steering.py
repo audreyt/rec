@@ -63,6 +63,31 @@ def native_steps_match(engine, prompt, steps=8):
     return {"prompt": prompt, "bit_identical_steps": matches, "steps": steps}
 
 
+def probe_matches(engine, prompt, tokens=48):
+    # Probing reads the trace the decoder already writes, so tokens must not change. Row i belongs
+    # to the step whose input was token i, so its slot-0 value is that token's embedding projection.
+    sampler, native = engine.resident_sampler, engine.runtime.model.native
+    direction, sampler.probe = sampler.probe, None
+    ids = engine.prompt([{"role": "user", "content": prompt}])
+    sampling = Sampling(temperature=0.0, top_p=1.0, top_k=0, max_tokens=tokens)
+    engine._prompt_cache = None
+    plain, _ = resident_tokens(engine, ids, sampling)
+    sampler.probe = direction
+    engine._prompt_cache = None
+    events = list(engine.generate_tokens(ids, sampling))
+    probed = [e["token"] for e in events if "token" in e]
+    rows = [e["probe"] for e in events if "token" in e][1:]
+    embedded = native.model.embed_tokens(mx.array([probed[:-1]], mx.int32))[0]
+    expected = (embedded.astype(mx.float32) @ direction).tolist()
+    return {
+        "tokens_identical": plain == probed,
+        "rows": len(rows),
+        "row_width": len(rows[0]),
+        "slot0_max_error": max(abs(row[0] - e) for row, e in zip(rows, expected, strict=True)),
+        "summary": events[-1]["metrics"]["probe"]["layer_mean"][:5],
+    }
+
+
 def reply(engine, prompt, max_tokens):
     sampling = Sampling(temperature=0.0, top_p=1.0, top_k=0, max_tokens=max_tokens)
     messages = [{"role": "user", "content": prompt}]
@@ -85,6 +110,7 @@ def main():
     parser.add_argument("--manifest", type=Path, required=True, help="checkpoint manifest")
     parser.add_argument("--steering-file", type=Path, help="steering file (omit for the baseline)")
     parser.add_argument("--steering-strength", type=float, default=1.0)
+    parser.add_argument("--probe-file", type=Path, help="also check the projection probe")
     parser.add_argument("--output", type=Path, required=True, help="JSON file for the results")
     args = parser.parse_args()
     engine = Engine(
@@ -93,8 +119,14 @@ def main():
         context_limit=8192,
         steering_file=args.steering_file,
         steering_strength=args.steering_strength,
+        probe_file=args.probe_file,
     )
     agreement = [native_steps_match(engine, prompt) for prompt in PROMPTS]
+    probe = (
+        [probe_matches(engine, prompt) for prompt in PROMPTS]
+        if args.probe_file is not None
+        else None
+    )
     ids = engine.prompt(
         [{"role": "user", "content": "Write a long story about a lighthouse keeper."}]
     )
@@ -110,6 +142,7 @@ def main():
     result = {
         "steering": engine.startup["steering"],
         "agreement": agreement,
+        "probe": probe,
         "decode_tokens_per_second": speeds,
         "code_passes": code_passes(code),
         "code_answer_chars": len(code),

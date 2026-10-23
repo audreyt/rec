@@ -87,6 +87,16 @@ def main():
         help="multiply the steering file's per-slot strengths (default: %(default)s)",
     )
     parser.add_argument(
+        "--probe-file",
+        type=Path,
+        help="report each token's residual projection on this file's direction, without steering",
+    )
+    parser.add_argument(
+        "--probe-layer",
+        type=int,
+        help="record the per-token projection after this layer in metrics (0 is the embedding)",
+    )
+    parser.add_argument(
         "--fast-sync",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -110,6 +120,8 @@ def main():
             parser.error("API-key file must contain one nonempty token")
     if args.steering_file is None and args.steering_strength != 1.0:
         parser.error("--steering-strength requires --steering-file")
+    if args.probe_file is None and args.probe_layer is not None:
+        parser.error("--probe-layer requires --probe-file")
     engine = Engine(
         args.model_dir,
         args.manifest,
@@ -117,6 +129,8 @@ def main():
         enforce_tool_schemas=args.enforce_tool_schemas,
         steering_file=args.steering_file,
         steering_strength=args.steering_strength,
+        probe_file=args.probe_file,
+        probe_layer=args.probe_layer,
     )
     print(
         json.dumps(
