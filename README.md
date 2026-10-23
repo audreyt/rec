@@ -108,6 +108,27 @@ The response contains generated text in `choices`. For other clients, use
 base URL `http://127.0.0.1:11500/v1`, model `flint`, and the API key from
 `rec auth token`.
 
+### Steer the residual stream
+
+The engine, `rec-mlx serve` or `rec-mlx chat`, can steer Flint along one
+direction in its residual stream. Pass `--steering-file FILE`, a
+`.safetensors` or `.npz` file with a `direction` tensor of 2048 values. There
+are 99 slots: slot 0 follows the embedding, slot `1 + 2*i` follows layer `i`'s
+attention and slot `2 + 2*i` its MLP. At each slot the component `d` of the
+residual along the direction moves toward `clamp(d, low, high) + shift` by
+`strength`. Optional `strength`, `low`, `high`, and `shift` tensors give one
+value per slot.
+
+A file with only a direction removes that direction at every slot. This is the
+runtime equivalent of abliterating the weights along it; the checkpoint is
+untouched. Set `strength` to 0 to skip a slot, a finite `high` to cap unusual
+activity, or a `shift` to push along the direction. `--steering-strength`
+scales every slot's strength. Prefill runs the decode kernel's steering code,
+so the two paths stay bit-identical. Without `--steering-file` the engine is
+unchanged. The `ready` event reports
+the file's SHA-256 and its active slots. `rec serve` does not pass these flags
+yet.
+
 
 ## Commands
 

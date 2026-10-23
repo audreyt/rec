@@ -53,6 +53,8 @@ class Engine:
         *,
         context_limit: int,
         enforce_tool_schemas: bool = False,
+        steering_file: Path | None = None,
+        steering_strength: float = 1.0,
     ):
         if platform.system() != "Darwin" or platform.machine() != "arm64":
             raise RuntimeError("Flint requires an Apple Silicon Mac")
@@ -87,7 +89,19 @@ class Engine:
         mx.set_cache_limit(0)
         mx.clear_cache()
         mx.reset_peak_memory()
-        self.runtime, self.resident_sampler = build_decoder(QATModel(directory), optimized=True)
+        steering = None
+        if steering_file is not None:
+            from .steering import load
+
+            steering = load(
+                steering_file,
+                hidden_size=config["hidden_size"],
+                layers=config["num_hidden_layers"],
+                strength=steering_strength,
+            )
+        self.runtime, self.resident_sampler = build_decoder(
+            QATModel(directory), optimized=True, steering=steering
+        )
         # Packing replaces native weights with lazy views. Materialize them on their creation
         # stream before HTTP threads use the native prefill model.
         mx.eval(self.runtime.model.native.parameters())
@@ -108,6 +122,9 @@ class Engine:
             "device_profile": profile.chip,
             "weight_format": self.identity["weight_format"],
             "kv_format": self.identity["kv_format"],
+            "steering": None
+            if steering is None
+            else dict(steering.summary(), strength=steering_strength),
         }
 
     @property
