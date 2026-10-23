@@ -272,6 +272,30 @@ class BuildTests(unittest.TestCase):
         self.assertAlmostEqual(float(tensors["shift"][4].item()), sign * 6.0, delta=0.2)
 
 
+class ProbeTests(unittest.TestCase):
+    def test_summary_reports_layers_and_the_chosen_series(self):
+        from rec_mlx.engine import Engine
+
+        engine = Engine.__new__(Engine)
+        engine.probe_layer = 1
+        summary = engine._probe_summary([[1.0, -2.0, 0.5], [3.0, 0.0, -0.5]])
+        self.assertEqual(summary["tokens"], 2)
+        self.assertEqual(summary["layer_mean"], [2.0, -1.0, 0.0])
+        self.assertEqual(summary["layer_max"], [3.0, 0.0, 0.5])
+        self.assertEqual(summary["per_token"], [-2.0, 0.0])
+        engine.probe_layer = None
+        self.assertNotIn("per_token", engine._probe_summary([[1.0]]))
+
+    def test_probe_layer_requires_a_probe_file(self):
+        argv = ["rec-mlx", "chat", "flint", "--model-dir", ".", "--manifest", "m.json"]
+        with (
+            patch("sys.argv", [*argv, "--probe-layer", "3"]),
+            redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit),
+        ):
+            main()
+
+
 class CommandLineTests(unittest.TestCase):
     def test_flags_reach_the_engine(self):
         engine = Mock(identity={"model_id": "flint"}, startup={})
