@@ -9,6 +9,7 @@ import threading
 from http.server import ThreadingHTTPServer
 
 from .anthropic import (
+    ErrorTranslator,
     MessageEventStream,
     anthropic_error,
     chat_to_message,
@@ -52,15 +53,19 @@ def make_server(
             expected = ("Bearer " + api_key).encode()
             if hmac.compare_digest(self.headers.get("Authorization", "").encode(), expected):
                 return True
-            if self.path == "/v1/messages" and hmac.compare_digest(
+            if self.route() == "/v1/messages" and hmac.compare_digest(
                 self.headers.get("x-api-key", "").encode(), api_key.encode()
             ):
                 return True
             self._reject(401, "Invalid or missing bearer token")
             return False
 
+        def route(self):
+            # The Anthropic SDK and Claude Code post to /v1/messages?beta=true.
+            return self.path.split("?", 1)[0]
+
         def _reject(self, status, message):
-            if self.path == "/v1/messages" or getattr(self, "anthropic", False):
+            if self.route() == "/v1/messages" or getattr(self, "anthropic", False):
                 self.reply(status, anthropic_error(status, message))
             else:
                 self.reply(status, {"error": message})
@@ -86,7 +91,7 @@ def make_server(
         def do_POST(self):
             if not self.authenticated():
                 return
-            if self.path not in ("/v1/chat/completions", "/v1/messages"):
+            if self.route() not in ("/v1/chat/completions", "/v1/messages"):
                 self._reject(404, "Unknown endpoint")
                 return
             try:
@@ -102,7 +107,7 @@ def make_server(
                 self._reject(429, "The request queue is full; retry after a generation finishes")
                 return
             try:
-                if self.path == "/v1/messages":
+                if self.route() == "/v1/messages":
                     self.anthropic = True
                     self._prepare_messages()
                 super().do_POST()
@@ -149,6 +154,7 @@ def make_server(
             # mlx-lm maps failures before generation to 404, including a stopped worker.
             if status == 404 and generator.stopping.is_set():
                 status = 503
+            self.completion_status = status
             super()._set_completion_headers(status)
 
         def generate_response(self, *args, **kwargs):
@@ -307,13 +313,18 @@ def make_server(
             except (ValueError, TypeError, KeyError) as error:
                 self._reject(400, str(error))
                 return
-            if getattr(self, "anthropic", False) and self.stream:
-                self.wfile = MessageEventStream(
-                    self.wfile,
-                    input_tokens=len(ids),
-                    stop_sequences=self.anthropic_stops,
-                    include_thinking=self.anthropic_thinking,
-                )
+            if getattr(self, "anthropic", False):
+                status = lambda: getattr(self, "completion_status", 500)  # noqa: E731
+                if self.stream:
+                    self.wfile = MessageEventStream(
+                        self.wfile,
+                        input_tokens=len(ids),
+                        status=status,
+                        stop_sequences=self.anthropic_stops,
+                        include_thinking=self.anthropic_thinking,
+                    )
+                else:
+                    self.wfile = ErrorTranslator(self.wfile, status)
             request.prompt_tokens = ids
             request.is_disconnected = self.is_disconnected
             request.generation_context = None

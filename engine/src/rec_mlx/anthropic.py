@@ -1,7 +1,7 @@
 import json
+import logging
 
 _MAPPED = {
-    "disable_parallel_tool_calls",
     "max_tokens",
     "messages",
     "metadata",
@@ -24,8 +24,12 @@ def anthropic_error(status, message):
     kind = {
         400: "invalid_request_error",
         401: "authentication_error",
+        403: "permission_error",
         404: "not_found_error",
+        413: "request_too_large",
         429: "rate_limit_error",
+        503: "overloaded_error",
+        529: "overloaded_error",
     }.get(status, "api_error")
     return {"type": "error", "error": {"type": kind, "message": message}}
 
@@ -58,11 +62,6 @@ def messages_to_chat(body):
         chat["tools"] = _tools(body["tools"])
     if "tool_choice" in body:
         chat["tool_choice"] = _tool_choice(body["tool_choice"])
-    if "disable_parallel_tool_calls" in body:
-        if type(body["disable_parallel_tool_calls"]) is not bool:
-            raise ValueError("disable_parallel_tool_calls must be a boolean")
-        if body["disable_parallel_tool_calls"]:
-            raise ValueError("disable_parallel_tool_calls is not supported")
     return chat, set(body) - _MAPPED, _include_thinking(body.get("thinking"))
 
 
@@ -88,9 +87,33 @@ def chat_to_message(response, *, stop_sequences=(), include_thinking=True):
     }
 
 
-class MessageEventStream:
-    def __init__(self, raw, *, input_tokens, stop_sequences=(), include_thinking=True):
+class ErrorTranslator:
+    """Rewrites a chat error body from mlx-lm into the Messages error shape."""
+
+    def __init__(self, raw, status):
         self.raw = raw
+        self.status = status
+
+    def write(self, data):
+        if data[:1] == b"{":
+            self.raw.write(_error_body(data, self.status()))
+        else:
+            self.raw.write(data)
+        return len(data)
+
+    def flush(self):
+        return self.raw.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.raw, name)
+
+
+class MessageEventStream:
+    def __init__(
+        self, raw, *, input_tokens, status=lambda: 500, stop_sequences=(), include_thinking=True
+    ):
+        self.raw = raw
+        self.status = status
         self.input_tokens = input_tokens
         self.stop_sequences = tuple(stop_sequences)
         self.include_thinking = include_thinking
@@ -122,7 +145,7 @@ class MessageEventStream:
                 return len(data)
         self.headers_sent = True
         if not self.pending and data[:1] == b"{":
-            self.raw.write(_error_body(data))
+            self.raw.write(_error_body(data, self.status()))
             return len(data)
         self.pending += data
         while b"\n\n" in self.pending:
@@ -257,17 +280,22 @@ class MessageEventStream:
         self.raw.flush()
 
 
-def _error_body(data):
+def _error_body(data, status):
     try:
         payload = json.loads(data)
     except json.JSONDecodeError:
         return data
-    if not isinstance(payload, dict) or "choices" in payload or "error" not in payload:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("type") in ("message", "error")
+        or "choices" in payload
+        or "error" not in payload
+    ):
         return data
     message = payload["error"]
     if not isinstance(message, str):
         message = json.dumps(message)
-    return json.dumps(anthropic_error(500, message)).encode()
+    return json.dumps(anthropic_error(status if status >= 400 else 500, message)).encode()
 
 
 def _message_id(value):
@@ -311,9 +339,16 @@ def _blocks(message, include_thinking):
 def _include_thinking(thinking):
     if thinking is None:
         return True
-    if not isinstance(thinking, dict) or thinking.get("type") not in ("enabled", "disabled"):
-        raise ValueError("thinking.type must be enabled or disabled")
-    return thinking["type"] != "disabled"
+    # Current Claude clients send adaptive; Flint decides its own reasoning length either way.
+    if not isinstance(thinking, dict) or thinking.get("type") not in (
+        "enabled",
+        "adaptive",
+        "disabled",
+    ):
+        raise ValueError("thinking.type must be enabled, adaptive, or disabled")
+    if thinking.get("display", "summarized") not in ("summarized", "omitted"):
+        raise ValueError("thinking.display must be summarized or omitted")
+    return thinking["type"] != "disabled" and thinking.get("display") != "omitted"
 
 
 def _system(system):
@@ -324,9 +359,12 @@ def _system(system):
     return _text(system, "system")
 
 
-def _text(blocks, where):
+def _text(blocks, where, *, media=False):
     parts = []
     for block in blocks:
+        if media and isinstance(block, dict) and block.get("type") in ("image", "document"):
+            parts.append(_media(block))
+            continue
         if (
             not isinstance(block, dict)
             or block.get("type") != "text"
@@ -334,7 +372,26 @@ def _text(blocks, where):
         ):
             raise ValueError(f"{where} blocks must be text")
         parts.append(block["text"])
-    return "".join(parts)
+    return "\n\n".join(parts)
+
+
+_media_warned = set()
+
+
+def _media(block):
+    # Flint reads text only. Rejecting the block would fail every later turn of a
+    # session whose history holds one, so it becomes a short note instead; a
+    # plain-text document keeps its text.
+    kind = block["type"]
+    source = block.get("source")
+    if kind == "document" and isinstance(source, dict) and source.get("type") == "text":
+        if not isinstance(source.get("data"), str):
+            raise ValueError("text document sources require string data")
+        return source["data"]
+    if kind not in _media_warned:
+        _media_warned.add(kind)
+        logging.warning("Replacing %s blocks with a note; this model reads text only", kind)
+    return f"[{kind} omitted: this model reads text only]"
 
 
 def _stop_sequences(stops):
@@ -347,6 +404,11 @@ def _tool_choice(choice):
     if not isinstance(choice, dict):
         raise ValueError("tool_choice must be an object")
     kind = choice.get("type")
+    if "disable_parallel_tool_use" in choice:
+        if type(choice["disable_parallel_tool_use"]) is not bool:
+            raise ValueError("tool_choice.disable_parallel_tool_use must be a boolean")
+        if choice["disable_parallel_tool_use"]:
+            raise ValueError("tool_choice.disable_parallel_tool_use=true is not supported")
     if kind in ("auto", "none"):
         return kind
     if kind in ("any", "tool"):
@@ -392,8 +454,12 @@ def _messages(messages):
             converted.extend(_user(message.get("content")))
         elif role == "assistant":
             converted.append(_assistant(message.get("content")))
+        elif role == "system":
+            # Claude Code sends later instructions as system messages
+            # (mid-conversation-system beta); Flint's template renders them in place.
+            converted.append({"role": "system", "content": _system(message.get("content"))})
         else:
-            raise ValueError("message roles must be user or assistant")
+            raise ValueError("message roles must be user, assistant, or system")
     return converted
 
 
@@ -407,7 +473,7 @@ def _user(content):
 
     def flush():
         if text:
-            converted.append({"role": "user", "content": "".join(text)})
+            converted.append({"role": "user", "content": "\n\n".join(text)})
             text.clear()
 
     for block in content:
@@ -421,6 +487,8 @@ def _user(content):
         elif kind == "tool_result":
             flush()
             converted.append(_tool_result(block))
+        elif kind in ("image", "document"):
+            text.append(_media(block))
         else:
             raise ValueError(f"Unsupported user block type {kind!r}")
     flush()
@@ -433,7 +501,7 @@ def _tool_result(block):
         raise ValueError("tool_result requires a tool_use_id")
     content = block.get("content", "")
     if isinstance(content, list):
-        content = _text(content, "tool_result")
+        content = _text(content, "tool_result", media=True)
     elif not isinstance(content, str):
         raise ValueError("tool_result content must be a string or text blocks")
     if "is_error" in block and type(block["is_error"]) is not bool:
@@ -471,7 +539,7 @@ def _assistant(content):
             calls.append(_tool_use(block))
         else:
             raise ValueError(f"Unsupported assistant block type {kind!r}")
-    message["content"] = "".join(texts)
+    message["content"] = "\n\n".join(texts)
     if thoughts:
         message["reasoning_content"] = "".join(thoughts)
     if calls:

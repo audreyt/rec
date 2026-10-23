@@ -426,6 +426,20 @@ class ServingTest(unittest.TestCase):
         self.assertEqual(delta["delta"]["stop_reason"], "max_tokens")
         self.assertEqual(delta["usage"]["output_tokens"], 2)
 
+    def test_messages_translates_errors_raised_before_generation(self):
+        first = self.pool.submit(self.request, "A", max_tokens=2)
+        self.assertTrue(self.engine.started.wait(3))
+        body = {"model": "flint", "max_tokens": 2, "messages": [{"role": "user", "content": "B"}]}
+        second = self.pool.submit(self.messages, body)
+        self.wait_queued()
+        self.server.generator.cancel()
+        self.server.generator.join()
+        self.assertEqual(first.result()[0], 200)
+        status, payload = second.result()
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["type"], "error")
+        self.assertEqual(payload["error"]["type"], "overloaded_error")
+
     def test_messages_accepts_bearer_token_or_api_key(self):
         server = make_server(
             self.engine, ("127.0.0.1", 0), Path(self.temp.name) / "metrics-auth", api_key="secret"
@@ -451,6 +465,8 @@ class ServingTest(unittest.TestCase):
             self.assertEqual(status, 401)
             self.assertEqual(payload["error"]["type"], "authentication_error")
             self.assertEqual(post("/v1/messages", {"x-api-key": "secret"})[0], 200)
+            # The Anthropic SDK and Claude Code add a query string.
+            self.assertEqual(post("/v1/messages?beta=true", {"x-api-key": "secret"})[0], 200)
             self.assertEqual(post("/v1/messages", {"Authorization": "Bearer secret"})[0], 200)
             self.assertEqual(post("/v1/chat/completions", {"x-api-key": "secret"})[0], 401)
             self.assertEqual(

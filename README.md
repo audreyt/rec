@@ -115,6 +115,9 @@ from `rec auth token` as a bearer token or as `x-api-key`. The model is
 onto the chat path, and Flint's reasoning comes back as thinking blocks. A
 field the chat API does not implement is ignored or rejected the same way
 `/v1/chat/completions` treats it.
+Flint reads text only, so image and document blocks become a short note
+and a plain-text document keeps its text. For Claude Code, also set
+`ANTHROPIC_MODEL=flint` and `ANTHROPIC_SMALL_FAST_MODEL=flint`.
 
 
 ## Commands

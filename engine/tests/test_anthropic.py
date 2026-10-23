@@ -2,7 +2,12 @@ import io
 import json
 import unittest
 
-from rec_mlx.anthropic import MessageEventStream, chat_to_message, messages_to_chat
+from rec_mlx.anthropic import (
+    ErrorTranslator,
+    MessageEventStream,
+    chat_to_message,
+    messages_to_chat,
+)
 
 
 def chat(**overrides):
@@ -128,22 +133,101 @@ class MessagesRequestTests(unittest.TestCase):
                 {
                     "model": "flint",
                     "max_tokens": 4,
-                    "messages": [{"role": "user", "content": [{"type": "image", "source": {}}]}],
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
                 },
-                "image",
+                "disable_parallel_tool_use=true is not supported",
             ),
             (
                 {
                     "model": "flint",
                     "max_tokens": 4,
                     "messages": [{"role": "user", "content": "Hi"}],
-                    "disable_parallel_tool_calls": True,
+                    "thinking": {"type": "sometimes"},
                 },
-                "not supported",
+                "adaptive",
             ),
         ):
             with self.subTest(text=text), self.assertRaisesRegex(ValueError, text):
                 messages_to_chat(body)
+
+    def test_accepts_current_claude_client_fields(self):
+        converted, ignored, thinking = chat(
+            messages=[
+                {"role": "user", "content": "Hi"},
+                {"role": "system", "content": [{"type": "text", "text": "Now be brief"}]},
+            ],
+            thinking={"type": "adaptive"},
+            tool_choice={"type": "auto", "disable_parallel_tool_use": False},
+            disable_parallel_tool_calls=True,
+        )
+        self.assertTrue(thinking)
+        self.assertEqual(converted["messages"][1], {"role": "system", "content": "Now be brief"})
+        self.assertFalse(chat(thinking={"type": "adaptive", "display": "omitted"})[2])
+        # Not an Anthropic field, so it is ignored like any other unknown field.
+        self.assertEqual(ignored, {"disable_parallel_tool_calls"})
+
+    def test_text_blocks_keep_a_separator(self):
+        converted, _, _ = chat(
+            system=[{"type": "text", "text": "a"}, {"type": "text", "text": "b"}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "c"}, {"type": "text", "text": "d"}],
+                }
+            ],
+        )
+        self.assertEqual(converted["messages"][0]["content"], "a\n\nb")
+        self.assertEqual(converted["messages"][1]["content"], "c\n\nd")
+
+    def test_images_and_documents_become_notes_so_sessions_continue(self):
+        image = {"type": "image", "source": {"type": "base64", "media_type": "image/png"}}
+        with self.assertLogs(level="WARNING"):
+            converted, _, _ = chat(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "What is this?"},
+                            image,
+                            {
+                                "type": "document",
+                                "source": {
+                                    "type": "text",
+                                    "media_type": "text/plain",
+                                    "data": "notes",
+                                },
+                            },
+                            {"type": "document", "source": {"type": "base64", "data": "JVBE"}},
+                        ],
+                    },
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "tool_use", "id": "call-1", "name": "screenshot", "input": {}}
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "call-1",
+                                "content": [{"type": "text", "text": "Captured"}, image],
+                            }
+                        ],
+                    },
+                ]
+            )
+        user, _, result = converted["messages"]
+        self.assertEqual(
+            user["content"],
+            "What is this?\n\n[image omitted: this model reads text only]\n\nnotes"
+            "\n\n[document omitted: this model reads text only]",
+        )
+        self.assertEqual(
+            result["content"], "Captured\n\n[image omitted: this model reads text only]"
+        )
 
 
 class MessagesResponseTests(unittest.TestCase):
@@ -278,6 +362,27 @@ class MessagesResponseTests(unittest.TestCase):
         body = raw.getvalue()
         self.assertLess(body.index(b"HTTP/1.1 200 OK"), body.index(b"event: message_start"))
         self.assertIn(b"event: content_block_delta", body)
+
+    def test_errors_take_their_type_from_the_status(self):
+        for status, kind in (
+            (503, "overloaded_error"),
+            (404, "not_found_error"),
+            (500, "api_error"),
+        ):
+            with self.subTest(status=status):
+                raw = io.BytesIO()
+                ErrorTranslator(raw, lambda: status).write(b'{"error": "No worker"}')
+                self.assertEqual(
+                    json.loads(raw.getvalue()),
+                    {"type": "error", "error": {"type": kind, "message": "No worker"}},
+                )
+        raw = io.BytesIO()
+        already = b'{"type": "error", "error": {"type": "invalid_request_error", "message": "x"}}'
+        ErrorTranslator(raw, lambda: 400).write(already)
+        self.assertEqual(raw.getvalue(), already)
+        raw = io.BytesIO()
+        MessageEventStream(raw, input_tokens=1, status=lambda: 503).write(b'{"error": "Stopping"}')
+        self.assertEqual(json.loads(raw.getvalue())["error"]["type"], "overloaded_error")
 
 
 if __name__ == "__main__":
